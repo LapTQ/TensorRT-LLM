@@ -23,6 +23,31 @@ from .enc_dec_model_runner import EncDecModelRunner
 from .model_runner import ModelRunner
 from .session import Session, TensorInfo
 
+from laptq_pyutils.log import load_logger, pformat_color
+laptq_logger = load_logger(num__newline__before=1, num__newline__after=1)
+laptq_logger.level("WARNING", color="<yellow>")
+import time
+
+
+DICT__LOG__TIME = {
+    'get_visual_features': {
+        'value': None,
+        'count': 0,
+        'details': {
+            'self.visual_encoder_session.run': {
+                'value': None,
+                'count': 0,
+                'details': {}
+            }
+        }
+    },
+    'self.model.generate': {
+        'value': None,
+        'count': 0,
+        'details': {}
+    }
+}
+
 
 class LlavaNextUtils:
     # https://github.com/haotian-liu/LLaVA/blob/main/llava/mm_utils.py
@@ -244,10 +269,10 @@ class MultimodalModelRunner:
     def init_image_encoder(self):
         vision_encoder_path = os.path.join(self.args.visual_engine_dir,
                                            self.args.visual_engine_name)
-        logger.info(f'Loading engine from {vision_encoder_path}')
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color(f'Loading engine from {vision_encoder_path}'))
         with open(vision_encoder_path, 'rb') as f:
             engine_buffer = f.read()
-        logger.info(f'Creating session from engine {vision_encoder_path}')
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color(f'Creating session from engine {vision_encoder_path}'))
         self.visual_encoder_session = Session.from_serialized_engine(
             engine_buffer)
         if self.model_type in ["phi-3-vision", "llava_next"]:
@@ -285,6 +310,8 @@ class MultimodalModelRunner:
             else:
                 self.model_config = self.model.encoder_model_config
                 self.runtime_mapping = self.model.encoder_runtime_mapping
+        
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color(('self.model', self.model)))
 
     def video_preprocess(self, video_path):
         from decord import VideoReader
@@ -349,6 +376,11 @@ class MultimodalModelRunner:
         visual_features, visual_atts = self.get_visual_features(
             torch.stack(image['image_patches'], dim=0)
             if self.model_type == 'fuyu' else image, attention_mask)
+
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('visual_features.shape', visual_features.shape),
+            ('visual_atts.shape', visual_atts.shape),
+        )))
 
         if not warmup:
             profiler.stop("Vision")
@@ -434,12 +466,20 @@ class MultimodalModelRunner:
                                                 num_img_tokens)
             length = input_ids.shape[1]
         elif self.model_type == 'llava_next':
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                ('self.image_newlines', self.image_newlines),
+            )))
             visual_features = LlavaNextUtils.rearrange_image_features(
                 visual_features, self.image_newlines["image_newline"],
                 image_size)
             input_ids = self.ptuning_setup_llava_next(visual_features,
                                                       pre_prompt, post_prompt)
             length = input_ids.shape[1]
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                ('input_ids.shape[1]', input_ids.shape[1]),
+                ('visual_features.shape', visual_features.shape),
+                ('length', length)
+            )))
         else:
             pre_input_ids = self.tokenizer(pre_prompt,
                                            return_tensors="pt",
@@ -454,6 +494,12 @@ class MultimodalModelRunner:
                 else:
                     length = pre_input_ids.shape[1] + post_input_ids.shape[
                         1] + visual_atts.shape[1]
+                    laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                        ('pre_input_ids.shape[1]', pre_input_ids.shape[1]),
+                        ('post_input_ids.shape[1]', post_input_ids.shape[1]),
+                        ('visual_atts.shape[1]', visual_atts.shape[1]),
+                        ('length', length)
+                    )))
             else:
                 post_input_ids = None
                 length = pre_input_ids.shape[1] + visual_atts.shape[1]
@@ -537,6 +583,19 @@ class MultimodalModelRunner:
             warmup, pre_prompt, post_prompt, image, attention_mask)
         if warmup: return None
 
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            'input_ids, input_lengths, ptuning_args, visual_features = self.preprocess(',
+            # ('input_ids', input_ids),
+            ('input_ids.shape', input_ids.shape),
+            ('input_lengths', input_lengths),
+            # ('ptuning_args', ptuning_args),
+            ('ptuning_args[0].shape', ptuning_args[0].shape),
+            ('ptuning_args[1].shape', ptuning_args[1].shape) if self.model_type == "llava" else (None if self.model_type == 'llava_next' else "?????"),
+            ('ptuning_args[2]', ptuning_args[2]) if self.model_type == "llava" else (None if self.model_type == 'llava_next' else "?????"),
+            # ('visual_features', visual_features),
+            ('visual_features.shape', visual_features.shape),
+        )))
+
         profiler.start("LLM")
         if self.decoder_llm:
             end_id = self.tokenizer.eos_token_id
@@ -547,6 +606,7 @@ class MultimodalModelRunner:
                                                add_special_tokens=False)[0]
 
             ptuning_args[0] = torch.stack([ptuning_args[0]])
+            mtime_1 = time.time()
             output_ids = self.model.generate(
                 input_ids,
                 sampling_config=None,
@@ -563,6 +623,14 @@ class MultimodalModelRunner:
                 num_beams=self.args.num_beams,
                 output_sequence_lengths=False,
                 return_dict=False)
+            mtime_2 = time.time()
+            duration__1_2 = mtime_2 - mtime_1
+
+            if DICT__LOG__TIME['self.model.generate']['count'] <= 1:
+                DICT__LOG__TIME['self.model.generate']['value'] = duration__1_2
+            else:
+                DICT__LOG__TIME['self.model.generate']['value'] = 0.9 * DICT__LOG__TIME['self.model.generate']['value'] + 0.1 * duration__1_2
+            DICT__LOG__TIME['self.model.generate']['count'] += 1
         else:
             if self.model_type in ['nougat', 'pix2struct']:
                 # Trim encoder input_ids to match visual features shape
@@ -591,6 +659,10 @@ class MultimodalModelRunner:
                                        dtype=input_lengths.dtype)
         profiler.stop("LLM")
 
+        laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color((
+            ('DICT__LOG__TIME', DICT__LOG__TIME),
+        )))
+
         if mpi_rank() == 0:
             # Extract a list of tensors of shape beam_width x output_ids.
             output_beams_list = [
@@ -605,12 +677,17 @@ class MultimodalModelRunner:
                 for beam_idx in range(self.args.num_beams)
             ] for batch_idx in range(self.args.batch_size)]
             profiler.stop("Generate")
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color(('stripped_text', stripped_text)))
             return stripped_text
         else:
             profiler.stop("Generate")
             return None
 
     def get_visual_features(self, image, attention_mask):
+
+        import time
+
+        mtime_1 = time.time()
         visual_features = {
             'input': image.to(str_dtype_to_torch(self.vision_precision))
         }
@@ -628,6 +705,11 @@ class MultimodalModelRunner:
         visual_output_info = self.visual_encoder_session.infer_shapes(
             tensor_info)
 
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('tensor_info', tensor_info),
+            ('visual_output_info', visual_output_info)
+        )))
+
         visual_outputs = {
             t.name: torch.empty(tuple(t.shape),
                                 dtype=trt_dtype_to_torch(t.dtype),
@@ -635,14 +717,30 @@ class MultimodalModelRunner:
             for t in visual_output_info
         }
 
+        mtime_3 = time.time()
         ok = self.visual_encoder_session.run(visual_features, visual_outputs,
                                              self.stream.cuda_stream)
         assert ok, "Runtime execution failed for vision encoder session"
         self.stream.synchronize()
+        mtime_4 = time.time()
 
         image_embeds = visual_outputs['output']
         image_atts = torch.ones(image_embeds.size()[:-1],
                                 dtype=torch.long).to(image.device)
+        
+        mtime_2 = time.time()
+        duration__1_2 = mtime_2 - mtime_1
+        duration__3_4 = mtime_4 - mtime_3
+        if DICT__LOG__TIME['get_visual_features']['count'] <= 1:
+            DICT__LOG__TIME['get_visual_features']['value'] = duration__1_2
+        else:
+            DICT__LOG__TIME['get_visual_features']['value'] = 0.9 * DICT__LOG__TIME['get_visual_features']['value'] + 0.1 * duration__1_2
+        DICT__LOG__TIME['get_visual_features']['count'] += 1
+        if DICT__LOG__TIME['get_visual_features']['details']['self.visual_encoder_session.run']['count'] <= 1:
+            DICT__LOG__TIME['get_visual_features']['details']['self.visual_encoder_session.run']['value'] = duration__3_4
+        else:
+            DICT__LOG__TIME['get_visual_features']['details']['self.visual_encoder_session.run']['value'] = 0.9 * DICT__LOG__TIME['get_visual_features']['details']['self.visual_encoder_session.run']['value'] + 0.1 * duration__3_4
+        DICT__LOG__TIME['get_visual_features']['details']['self.visual_encoder_session.run']['count'] += 1
 
         return image_embeds, image_atts
 
@@ -817,7 +915,7 @@ class MultimodalModelRunner:
                 def load_image(image_path):
                     if image_path.startswith("http") or image_path.startswith(
                             "https"):
-                        logger.info(f"downloading image from url {image_path}")
+                        # laptq_logger.info(f"downloading image from url {image_path}")
                         response = requests.get(image_path, timeout=5)
                         image = Image.open(BytesIO(
                             response.content)).convert("RGB")
@@ -869,6 +967,10 @@ class MultimodalModelRunner:
         return image
 
     def setup_inputs(self, input_text, raw_image):
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            'def setup_inputs(self, input_text, raw_image):',
+            ('raw_image.size', raw_image.size),
+        )))
         from torchvision import transforms
         attention_mask = None
         if 'blip2' in self.model_type:
@@ -970,6 +1072,7 @@ class MultimodalModelRunner:
             post_prompt = f"\n{input_text}\n<extra_id_1>Assistant\n<extra_id_2>quality:4,toxicity:0,humor:0,creativity:0,helpfulness:4,correctness:4,coherence:4,complexity:4,verbosity:4\n" ""
 
         elif self.model_type == "llava_next":
+            # laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color(('elif self.model_type == "llava_next":', ('self.llm_name', self.llm_name))))
             if self.llm_name == "mistralai/Mistral-7B-Instruct-v0.2":
                 pre_prompt = "[INST] "
                 if input_text is None:
@@ -994,6 +1097,13 @@ class MultimodalModelRunner:
             image = processor(text=prompt,
                               images=raw_image,
                               return_tensors="pt")
+            
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                'image = processor(text=prompt,',
+                ('raw_image.size', raw_image.size),
+                ('processor', type(processor)),
+                ('image.shape', image['pixel_values'].shape),
+            )))
 
         elif self.model_type in ['llava', 'vila', 'fuyu', 'kosmos-2']:
             # LLaVA and VILA
@@ -1060,6 +1170,9 @@ class MultimodalModelRunner:
                 image = image.expand(self.args.batch_size, -1, -1,
                                      -1).contiguous()
         image = image.to(self.device)
+
+        # laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color(('image', type(image), image, image['pixel_values'].shape)))
+
         # Generate decoder_input_ids for enc-dec models
         # Custom prompts can be added as:
         # decoder_input_ids = model.tokenizer(decoder_prompt).input_ids
@@ -1083,6 +1196,17 @@ class MultimodalModelRunner:
     def run(self, input_text, input_image, max_new_tokens):
         input_text, pre_prompt, post_prompt, processed_image, decoder_input_ids, attention_mask = self.setup_inputs(
             input_text, input_image)
+        
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            'input_text, pre_prompt, post_prompt, processed_image, decoder_input_ids, attention_mask = self.setup_inputs(',
+            ('input_text', input_text),
+            ('input_image.size', input_image.size),
+            ('pre_prompt', pre_prompt),
+            ('post_prompt', post_prompt),
+            ('processed_image.shape', processed_image.shape if self.model_type == "llava" else (processed_image['pixel_values'].shape if self.model_type == 'llava_next' else "?????")),
+            ('decoder_input_ids', decoder_input_ids), 
+            ('attention_mask', attention_mask)
+        )))
 
         output_text = self.generate(pre_prompt,
                                     post_prompt,
@@ -1091,5 +1215,9 @@ class MultimodalModelRunner:
                                     max_new_tokens,
                                     attention_mask=attention_mask,
                                     warmup=False)
+        
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('output_text', output_text),
+        )))
 
         return input_text, output_text

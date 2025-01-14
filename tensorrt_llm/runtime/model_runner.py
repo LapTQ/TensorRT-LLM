@@ -36,6 +36,10 @@ from .generation import (ChatGLMGenerationSession, GenerationSession,
                          QWenForCausalLMGenerationSession, SamplingConfig,
                          StoppingCriteria, to_word_list_format)
 
+from laptq_pyutils.log import load_logger, pformat_color
+laptq_logger = load_logger(num__newline__before=1, num__newline__after=1)
+laptq_logger.level("WARNING", color="<yellow>")
+
 
 def get_engine_name(model: str, dtype: str, tp_size: int, pp_size: int,
                     rank: int) -> str:
@@ -544,6 +548,11 @@ class ModelRunner(ModelRunnerMixin):
                      max_beam_width=max_beam_width,
                      lora_manager=lora_manager)
         runner.enable_context_fmha_fp32_acc = enable_context_fmha_fp32_acc
+        
+        laptq_logger.bind(classname=cls.__name__).info(pformat_color((
+            ('session', session),
+            ('runner', runner),
+        )))
         return runner
 
     @classmethod
@@ -579,6 +588,7 @@ class ModelRunner(ModelRunnerMixin):
             ModelRunner: An instance of ModelRunner.
         """
         engine_version = get_engine_version(engine_dir)
+        laptq_logger.bind(classname=cls.__name__).info(pformat_color(('engine_version', engine_version)))
         profiler.start('load tensorrt_llm engine')
         # the old engine format
         if engine_version is None:
@@ -774,6 +784,11 @@ class ModelRunner(ModelRunnerMixin):
                 context_logits and generation_logits (if self.gather_context_logits=True
                 and self.gather_generation_logits=True, respectively).
         """
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            # ('batch_input_ids', batch_input_ids),
+            ('batch_input_ids.shape', batch_input_ids.shape),
+            ('prompt_table.shape', prompt_table.shape),
+        )))
         # Use sampling_config like HF's generation_config
         if sampling_config is None:
             sampling_config = SamplingConfig(end_id=None, pad_id=None)
@@ -794,8 +809,14 @@ class ModelRunner(ModelRunnerMixin):
         self._check_inputs(batch_input_ids, sampling_config)
 
         batch_size = len(batch_input_ids)
-        batch_input_ids, input_lengths = self._prepare_inputs(
+        batch_input_ids, input_lengths = self._prepare_inputs(  # laptq: pad to equal length in a batch
             batch_input_ids, sampling_config.pad_id)
+
+        # laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color((
+        #     # ('batch_input_ids', batch_input_ids),
+        #     ('batch_input_ids.shape', batch_input_ids.shape),
+        #     ('input_lengths', input_lengths),
+        # )))
 
         if sampling_config.bad_words_list is not None:
             sampling_config.bad_words_list = to_word_list_format(
@@ -820,6 +841,13 @@ class ModelRunner(ModelRunnerMixin):
         input_lengths = input_lengths.cuda()
         ptuning_kwargs = self._prepare_ptuning(prompt_table, prompt_tasks,
                                                batch_size)
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('ptuning_kwargs.keys()', ptuning_kwargs.keys()),
+            ('ptuning_kwargs["prompt_embedding_table"].shape', ptuning_kwargs["prompt_embedding_table"].shape),
+            ('ptuning_kwargs["prompt_vocab_size"]', ptuning_kwargs["prompt_vocab_size"]),
+            ('ptuning_kwargs["tasks"]', ptuning_kwargs["tasks"]),
+        )))
+
         outputs = self.session.decode(
             batch_input_ids,
             input_lengths,

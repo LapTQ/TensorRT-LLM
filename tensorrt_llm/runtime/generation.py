@@ -43,6 +43,33 @@ from ..quantization import QuantMode
 from .kv_cache_manager import GenerationSequence, KVCacheManager, KVCacheUpdater
 from .session import _scoped_stream
 
+from laptq_pyutils.log import load_logger, pformat_color
+laptq_logger = load_logger(num__newline__before=1, num__newline__after=1)
+laptq_logger.level("WARNING", color="<yellow>")
+from tqdm import tqdm
+import time
+
+
+DICT__LOG__TIME = {
+    'self.handle_per_step--1st-token': {
+        'value': None,
+        'count': 0,
+        'details': {}
+    },
+    'self.handle_per_step--next-token': {
+        'value': None,
+        'count': 0,
+        'details': {}
+    },
+    'self.finalize_decoder': {
+        'value': None,
+        'count': 0,
+        'details': {}
+    },
+}
+
+LIST__STEPS = [[]]
+
 
 def decode_words_list(word_dict: List[List[str]],
                       tokenizer=None,
@@ -1321,6 +1348,14 @@ class GenerationSession(object):
                      dtype=padded_input_ids.dtype,
                      device=padded_input_ids.device)),
                 axis=-1)
+        
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('padded_input_ids.shape', padded_input_ids.shape),
+            ('self.max_seq_length', self.max_seq_length),
+            ('max_context_length', max_context_length),
+            ('self.max_seq_length - max_context_length', self.max_seq_length - max_context_length),
+            ('self.output_ids.shape', self.output_ids.shape),
+        )))
 
         # Note: we still allocate max_seq_length size of parent ids (not max_attention_window_size).
         self.parent_ids = torch.zeros(
@@ -1388,9 +1423,15 @@ class GenerationSession(object):
                  scfg.num_beams),
                 dtype=torch.float32,
                 device=self.device)
+            laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color((
+                ('self.log_probs.shape', self.log_probs.shape),
+            )))
         else:
             self.log_probs = None
             self.log_probs_tiled = None
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                ('self.log_probs', self.log_probs),
+            )))
 
         self.finished = torch.zeros((batch_size, scfg.num_beams),
                                     dtype=torch.uint8,
@@ -3429,7 +3470,15 @@ class GenerationSession(object):
                                                     step_count)
 
         next_step_tensors = None
-        for step in range(0, self.max_new_tokens):
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('input_ids.shape', input_ids.shape),
+            ('self.max_new_tokens', self.max_new_tokens),
+            ('prompt_embedding_table.shape', prompt_embedding_table.shape),
+        )))
+        pbar = tqdm(range(0, self.max_new_tokens))
+        for step in pbar:
+
+            mtime_1 = time.time()
 
             should_stop, next_step_tensors, tasks, context_lengths, host_context_lengths, attention_mask, context_logits, generation_logits, encoder_input_lengths = self.handle_per_step(
                 cache_indirections, step, batch_size, max_context_length,
@@ -3442,6 +3491,21 @@ class GenerationSession(object):
                 sequence_lengths, next_step_tensors, stop_words_data,
                 bad_words_data, encoder_output, encoder_input_lengths,
                 stopping_criteria, logits_processor, **kwargs)
+            mtime_2 = time.time()
+            duration__1_2 = mtime_2 - mtime_1
+            if step == 0:
+                if DICT__LOG__TIME['self.handle_per_step--1st-token']['count'] <= 1:
+                    DICT__LOG__TIME['self.handle_per_step--1st-token']['value'] = duration__1_2
+                else:
+                    DICT__LOG__TIME['self.handle_per_step--1st-token']['value'] = 0.9 * DICT__LOG__TIME['self.handle_per_step--1st-token']['value'] + 0.1 * duration__1_2
+                DICT__LOG__TIME['self.handle_per_step--1st-token']['count'] += 1
+            else:
+                if DICT__LOG__TIME['self.handle_per_step--next-token']['count'] <= 1:
+                    DICT__LOG__TIME['self.handle_per_step--next-token']['value'] = duration__1_2
+                else:
+                    DICT__LOG__TIME['self.handle_per_step--next-token']['value'] = 0.9 * DICT__LOG__TIME['self.handle_per_step--next-token']['value'] + 0.1 * duration__1_2
+                DICT__LOG__TIME['self.handle_per_step--next-token']['count'] += 1
+
             if step == 0:
                 if benchmark_profiler is not None:
                     benchmark_profiler.record_cuda_event('first_token')
@@ -3453,8 +3517,10 @@ class GenerationSession(object):
                     outputs_context_logits = context_logits
                 if self.gather_generation_logits:
                     outputs_generation_logits.append(generation_logits)
+                # laptq: hmm, though jump to here, the 2 if blocks are False
 
             if should_stop is not None and should_stop.item():
+                mtime_3 = time.time()
                 profile_fn(benchmark_profiler, generation_phase_step_count)
                 if self.is_medusa_mode or self.is_redrafter_mode:
                     # just hack away for now
@@ -3466,11 +3532,35 @@ class GenerationSession(object):
                 else:
                     final_output_ids = self.finalize_decoder(
                         context_lengths, batch_size, beam_width, scfg)
+                    mtime_4 = time.time()
+                    duration__3_4 = mtime_4 - mtime_3
+
+                    if DICT__LOG__TIME['self.finalize_decoder']['count'] <= 1:
+                        DICT__LOG__TIME['self.finalize_decoder']['value'] = duration__3_4
+                    else:
+                        DICT__LOG__TIME['self.finalize_decoder']['value'] = 0.9 * DICT__LOG__TIME['self.finalize_decoder']['value'] + 0.1 * duration__3_4
+                    DICT__LOG__TIME['self.finalize_decoder']['count'] += 1
+
+                    laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                        ('step', step),
+                        ('should_stop', should_stop),
+                        ('final_output_ids.shape', final_output_ids.shape),
+                    )))
+                    DICT__LOG__TIME['self.handle_per_step--next-token']['speed'] = 1 / DICT__LOG__TIME['self.handle_per_step--next-token']['value']
+                    laptq_logger.bind(classname=self.__class__.__name__).success(pformat_color((
+                        ('DICT__LOG__TIME', DICT__LOG__TIME),
+                    )))
+                    LIST__STEPS[0].append(step)
+                    LIST__STEPS[0] = sorted(LIST__STEPS[0])
+                    laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                        ('LIST__STEPS', LIST__STEPS)
+                    )))
 
                 if self.mapping.is_first_pp_rank():
                     if return_dict:
                         return get_outputs_dict(final_output_ids, step + 1)
                     else:
+                        laptq_logger.bind(classname=self.__class__.__name__).info('>>> This branch: \nif self.mapping.is_first_pp_rank():\n\tif return_dict:\n\t\t...\n\telse: <-----\n\t\treturn final_output_ids')
                         return final_output_ids
                 elif self.mapping.is_last_pp_rank():
                     outputs = {}
@@ -3481,6 +3571,14 @@ class GenerationSession(object):
                     return outputs
                 else:
                     return None
+            
+            pbar.set_postfix(
+                step=step,
+                handle_per_step__1st_token__value=DICT__LOG__TIME['self.handle_per_step--1st-token']['value'],
+                count__1st_token=DICT__LOG__TIME['self.handle_per_step--1st-token']['count'],
+                handle_per_step__next_token__value=DICT__LOG__TIME['self.handle_per_step--next-token']['value'],
+                count__next_token=DICT__LOG__TIME['self.handle_per_step--next-token']['count'],
+            )
 
         assert not self.is_medusa_mode and not self.is_redrafter_mode, "the custom decoder doesn't support medusa/redrafter."
 
@@ -3488,6 +3586,12 @@ class GenerationSession(object):
 
         final_output_ids = self.finalize_decoder(context_lengths, batch_size,
                                                  beam_width, scfg)
+        
+        LIST__STEPS[0].append(step)
+        LIST__STEPS[0] = sorted(LIST__STEPS[0])
+        laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+            ('LIST__STEPS', LIST__STEPS)
+        )))
         if self.mapping.is_first_pp_rank():
             if return_dict:
                 return get_outputs_dict(final_output_ids)
@@ -3813,6 +3917,7 @@ class GenerationSession(object):
 
         # start context phase
         if streaming:
+            laptq_logger.bind(classname=self.__class__.__name__).success(">>> self.decode_stream(...)")
             return self.decode_stream(
                 batch_size, scfg, sequence_lengths, context_lengths,
                 host_context_lengths, max_context_length, beam_width,
@@ -3823,6 +3928,7 @@ class GenerationSession(object):
                 encoder_input_lengths, stopping_criteria, logits_processor,
                 cross_attention_mask, **kwargs)
         else:
+            laptq_logger.bind(classname=self.__class__.__name__).info(">>> self.decode_regular(...)")
             return self.decode_regular(
                 batch_size, scfg, sequence_lengths, context_lengths,
                 host_context_lengths, max_context_length, beam_width,
