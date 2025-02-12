@@ -1427,11 +1427,9 @@ class GenerationSession(object):
                 ('self.log_probs.shape', self.log_probs.shape),
             )))
         else:
+            laptq_logger.bind(classname=self.__class__.__name__).warning(pformat_color("output_log_probs was set to False"))
             self.log_probs = None
             self.log_probs_tiled = None
-            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
-                ('self.log_probs', self.log_probs),
-            )))
 
         self.finished = torch.zeros((batch_size, scfg.num_beams),
                                     dtype=torch.uint8,
@@ -2634,6 +2632,12 @@ class GenerationSession(object):
                 self.log_probs, self.log_probs_tiled, *beam_hyps_args,
                 self.finished, self.length_penalty, batch_size, beam_width,
                 self.max_seq_length, scfg.use_beam_hyps)
+
+            laptq_logger.bind(classname=self.__class__.__name__).info(pformat_color((
+                ('self.cum_log_probs.exp_().shape', self.cum_log_probs.exp_().shape),
+                ('self.log_probs.exp_().shape', self.log_probs.exp_().shape),
+                ('self.log_probs_tiled.exp_().shape', self.log_probs_tiled.exp_().shape),
+            )))
 
         # Communicate ranks in Pipeline Parallelism
         if self.mapping.has_pp():

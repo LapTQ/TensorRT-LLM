@@ -788,6 +788,7 @@ class ModelRunner(ModelRunnerMixin):
             # ('batch_input_ids', batch_input_ids),
             ('batch_input_ids.shape', batch_input_ids.shape),
             ('prompt_table.shape', prompt_table.shape),
+            ("sampling_config", sampling_config),
         )))
         # Use sampling_config like HF's generation_config
         if sampling_config is None:
@@ -824,6 +825,10 @@ class ModelRunner(ModelRunnerMixin):
         if sampling_config.stop_words_list is not None:
             sampling_config.stop_words_list = to_word_list_format(
                 sampling_config.stop_words_list)
+        
+        # laptq
+        sampling_config.output_log_probs = True
+        sampling_config.output_cum_log_probs = True
 
         self.session.setup(
             batch_size=batch_size,
